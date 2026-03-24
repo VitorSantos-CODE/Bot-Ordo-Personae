@@ -1,0 +1,18 @@
+# Segredos — NUNCA commitar
+.env
+
+# Banco vetorial (gerado localmente, muito grande para o git)
+chroma_db/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+
+# VS Code
+.vscode/
+
+# Diagnóstico (arquivo temporário)
+diagnostico.py
