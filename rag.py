@@ -21,17 +21,30 @@ COLLECTION_NAME = "ordem_paranormal"
 EMBEDDING_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
 
 # Quantos trechos do livro buscar por pergunta (mais = mais contexto, mais tokens)
-N_RESULTADOS = 4
+N_RESULTADOS = 8
 
 # Modelo Gemini (flash = mais barato/rápido; pro = mais inteligente)
 GEMINI_MODEL = "gemini-2.5-flash"
 
-# Prompt do sistema — enxuto por design para economizar tokens
+# Palavras-chave que indicam pergunta comparativa — disparam busca dupla
+_PALAVRAS_COMPARACAO = [
+    "compare", "comparar", "comparação", "diferença", "diferente", "vs",
+    "versus", "melhor", "pior", "mais forte", "mais fraco", "entre",
+    "qual é mais", "qual tem mais", "qual tem menos",
+]
+
+# Prompt do sistema — permite síntese e comparação com base nos chunks
 SYSTEM_PROMPT = """Você é o Oráculo Paranormal, assistente especialista em Ordem Paranormal RPG.
-Responda de forma clara e direta, APENAS com base no contexto fornecido.
-Se a informação não estiver no contexto, diga: "Não encontrei essa informação no livro de regras."
-Não invente regras. Use termos do sistema (NEX, Rituais, Esforço, etc.) corretamente.
-Responda sempre em português. Fala como a Agatha, personagem de Ordem Paranormal"""
+Fale sempre como Agatha, personagem de Ordem Paranormal: sábia, direta e misteriosa.
+Responda sempre em português.
+
+Suas regras:
+1. Use APENAS os dados presentes nos trechos do livro fornecidos no contexto.
+2. Você PODE e DEVE fazer comparações, análises e sínteses a partir dos dados presentes no contexto — isso é esperado.
+3. Se os dados de dois ou mais elementos estiverem no contexto, compare-os livremente.
+4. Nunca invente stats, regras ou habilidades que não estejam no contexto.
+5. Se uma informação realmente não estiver em nenhum dos trechos, diga claramente qual parte não encontrou — mas responda o que conseguir com o que tem.
+6. Use termos do sistema corretamente: NEX, VD, Rituais, Esforço, Atributos, etc."""
 
 
 # ─── Embedding Function ───────────────────────────────────────────────────────
@@ -87,22 +100,111 @@ _collection, _modelo = _inicializar()
 
 # ─── Funções públicas ─────────────────────────────────────────────────────────
 
+def _eh_pergunta_comparativa(pergunta: str) -> bool:
+    """Detecta se a pergunta pede uma comparação entre dois ou mais elementos."""
+    pergunta_lower = pergunta.lower()
+    return any(palavra in pergunta_lower for palavra in _PALAVRAS_COMPARACAO)
+
+
+def _extrair_keywords(pergunta: str) -> list[str]:
+    """
+    Extrai termos específicos da pergunta para busca direta por keyword.
+    Filtra stop words e palavras muito genéricas.
+    """
+    import re
+    stop_words = {
+        "como", "quais", "qual", "quem", "onde", "quando", "quanto",
+        "todos", "todas", "lista", "passe", "passa", "sobre", "sendo",
+        "muito", "mais", "menos", "entre", "nessa", "nesse", "essa",
+        "esse", "para", "pelo", "pela", "ritual", "rituais", "livro",
+        "sistema", "regras", "personagem", "criar", "tenho", "tenha",
+        "posso", "existe", "existem", "falar", "saber", "quero", "favor",
+        "preciso", "passa", "passa", "passas", "manda", "mandas",
+    }
+    palavras = re.findall(r"[a-z\u00e0-\u00fc]{5,}", pergunta.lower())
+    return [p for p in palavras if p not in stop_words][:4]  # max 4 keywords
+
+
+def _extrair_termos_comparacao(pergunta: str) -> list[str]:
+    """
+    Tenta extrair os termos sendo comparados na pergunta.
+    Retorna uma lista de sub-queries para busca individual.
+    Estratégia simples: busca pela pergunta original + busca por cada
+    segmento separado por 'e', 'ou', 'vs', 'versus'.
+    """
+    import re
+    # Divide nos separadores mais comuns em comparações
+    partes = re.split(r'\b(e|ou|vs\.?|versus|com)\b', pergunta, flags=re.IGNORECASE)
+    # Filtra partes muito curtas (os próprios separadores)
+    termos = [p.strip() for p in partes if len(p.strip()) > 5]
+    # Sempre inclui a pergunta completa como primeira query (máx 4 queries)
+    queries: list[str] = [pergunta] + termos
+    resultado: list[str] = []
+    for i, q in enumerate(queries):
+        if i >= 4:
+            break
+        resultado.append(q)
+    return resultado
+
+
+
 def buscar_contexto(pergunta: str) -> tuple[str, list[int]]:
     """
     Busca os trechos mais relevantes do livro para a pergunta.
+    Usa busca híbrida: semântica + keyword direto (via where_document).
+    Para perguntas comparativas, faz buscas múltiplas.
     Retorna o contexto concatenado e as páginas de origem.
     """
-    resultados = _collection.query(
-        query_texts=[pergunta],
-        n_results=N_RESULTADOS,
-    )
+    if _eh_pergunta_comparativa(pergunta):
+        queries = _extrair_termos_comparacao(pergunta)
+    else:
+        queries = [pergunta]
 
-    documentos = resultados["documents"][0]
-    metadados = resultados["metadatas"][0]
-    paginas = sorted(set(m["pagina"] for m in metadados))
+    todos_docs: list[str] = []
+    todas_paginas: set[int] = set()
+    ids_vistos: set[str] = set()
 
-    # Junta os trechos com separador
-    contexto = "\n\n---\n\n".join(documentos)
+    # ── Busca semântica ───────────────────────────────────────────────────
+    for query in queries:
+        resultados = _collection.query(
+            query_texts=[query],
+            n_results=N_RESULTADOS,
+            include=["documents", "metadatas"],
+        )
+        docs_batch = list(resultados["documents"][0])  # type: ignore[index]
+        metas_batch = list(resultados["metadatas"][0])  # type: ignore[index]
+        ids_batch = list(resultados["ids"][0])  # type: ignore[index]
+        for doc, meta, doc_id in zip(docs_batch, metas_batch, ids_batch):
+            if str(doc_id) not in ids_vistos:
+                ids_vistos.add(str(doc_id))
+                todos_docs.append(str(doc))
+                todas_paginas.add(int(meta["pagina"]))
+
+    # ── Busca por keyword (garante termos específicos que o embedding perde) ─
+    keywords = _extrair_keywords(pergunta)
+    for keyword in keywords:
+        for variante in [keyword, keyword.capitalize(), keyword.title()]:
+            try:
+                r_kw = _collection.get(
+                    where_document={"$contains": variante},
+                    include=["documents", "metadatas"],
+                    limit=4,  # max 4 chunks por keyword
+                )
+                kw_docs = list(r_kw["documents"])   # type: ignore[index]
+                kw_metas = list(r_kw["metadatas"])  # type: ignore[index]
+                kw_ids = list(r_kw["ids"])           # type: ignore[index]
+                for doc, meta, doc_id in zip(kw_docs, kw_metas, kw_ids):
+                    if str(doc_id) not in ids_vistos:
+                        ids_vistos.add(str(doc_id))
+                        todos_docs.insert(0, str(doc))  # prioridade no contexto
+                        todas_paginas.add(int(meta["pagina"]))
+                if kw_docs:  # se encontrou com esta variante, não tenta as outras
+                    break
+            except Exception:
+                pass  # where_document pode não ser suportado em versões antigas
+
+    paginas = sorted(todas_paginas)
+    contexto = "\n\n---\n\n".join(todos_docs)
     return contexto, paginas
 
 

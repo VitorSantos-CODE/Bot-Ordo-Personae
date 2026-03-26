@@ -42,41 +42,40 @@ class LocalEmbeddingFunction(EmbeddingFunction):
 
 def extrair_texto_pdf(pdf_path: str) -> list[dict]:
     """
-    Extrai texto do PDF usando blocos posicionados.
-    Trata layout multi-coluna ordenando blocos por posição (y, x)
-    para evitar mistura de colunas — problema comum em livros de RPG.
+    Extrai texto do PDF usando blocos posicionados para multi-coluna.
+    Fallback para get_text("text") simples quando blocos produzem pouco conteúdo.
+    Isso recupera texto de páginas com layout não-padrão (ex: rituais, fichas).
     """
     print(f"\n[*] Abrindo PDF: {pdf_path}")
     doc = fitz.open(pdf_path)
     paginas = []
+    paginas_fallback: int = 0
 
     for i, page in enumerate(doc):
-        # Extrai blocos com posição: (x0, y0, x1, y1, texto, block_no, block_type)
-        blocos = page.get_text("blocks", sort=False)
+        largura_pagina = page.rect.width
+        meio = largura_pagina / 2
 
-        # Filtra só blocos de texto (type=0) com conteúdo útil
+        # ── Tentativa 1: extração por blocos (multi-coluna) ──────────────
+        blocos = page.get_text("blocks", sort=False)
         blocos_texto = [
             b for b in blocos
             if b[6] == 0 and b[4].strip() and len(b[4].strip()) > 10
         ]
 
-        if not blocos_texto:
-            continue
-
-        # Detecta a largura da página para identificar colunas
-        largura_pagina = page.rect.width
-        meio = largura_pagina / 2
-
-        # Separa blocos em coluna esquerda e direita
         coluna_esq = [b for b in blocos_texto if b[0] < meio]
         coluna_dir = [b for b in blocos_texto if b[0] >= meio]
-
-        # Ordena cada coluna de cima para baixo (por y0)
         coluna_esq.sort(key=lambda b: b[1])
         coluna_dir.sort(key=lambda b: b[1])
 
-        # Junta: esquerda primeiro, depois direita
         texto = "\n".join(b[4].strip() for b in coluna_esq + coluna_dir)
+
+        # ── Tentativa 2: fallback para get_text("text") simples ──────────
+        # Usado quando get_text("text") retorna significativamente MAIS conteúdo
+        # que os blocos filtrados — captura títulos e seções perdidas pelo filtro
+        texto_simples = page.get_text("text").strip()
+        if len(texto_simples) > len(texto.strip()) * 1.5:
+            texto = texto_simples
+            paginas_fallback = paginas_fallback + 1
 
         if texto.strip():
             paginas.append({"pagina": i + 1, "texto": texto})
@@ -84,8 +83,8 @@ def extrair_texto_pdf(pdf_path: str) -> list[dict]:
     total_paginas = len(doc)
     doc.close()
     print(f"[✓] {len(paginas)} páginas com texto extraídas de {total_paginas} total")
+    print(f"[✓] {paginas_fallback} páginas usaram fallback (get_text simples)")
     return paginas
-
 
 
 def criar_chunks(paginas: list[dict], chunk_size: int, overlap: int) -> list[dict]:
