@@ -21,7 +21,7 @@ COLLECTION_NAME = "ordem_paranormal"
 EMBEDDING_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
 
 # Quantos trechos do livro buscar por pergunta (mais = mais contexto, mais tokens)
-N_RESULTADOS = 8
+N_RESULTADOS = 10
 
 # Modelo Gemini (flash = mais barato/rápido; pro = mais inteligente)
 GEMINI_MODEL = "gemini-2.5-flash"
@@ -188,7 +188,7 @@ def buscar_contexto(pergunta: str) -> tuple[str, list[int]]:
                 r_kw = _collection.get(
                     where_document={"$contains": variante},
                     include=["documents", "metadatas"],
-                    limit=4,  # max 4 chunks por keyword
+                    limit=6,  # max 6 chunks por keyword
                 )
                 kw_docs = list(r_kw["documents"])   # type: ignore[index]
                 kw_metas = list(r_kw["metadatas"])  # type: ignore[index]
